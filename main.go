@@ -14,6 +14,7 @@ import (
 	"github.com/dongsheng123132/fastcp/pkg/scheduler"
 	"github.com/dongsheng123132/fastcp/pkg/verify"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var (
@@ -78,6 +79,13 @@ func main() {
 	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "minimal output")
 
 	rootCmd.Version = version
+
+	// Auto-detect: non-TTY → quiet mode (no progress/ANSI)
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		if !term.IsTerminal(int(os.Stderr.Fd())) && !jsonOutput {
+			quiet = true
+		}
+	}
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
