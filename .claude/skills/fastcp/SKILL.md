@@ -1,5 +1,6 @@
 ---
 name: fastcp
+version: 1.0.0
 description: Copy files from a source directory to multiple target directories in parallel. Optimized for batch-copying to multiple USB drives on the same hub. Reads source once into memory, writes to all targets concurrently.
 user_invocable: true
 ---
