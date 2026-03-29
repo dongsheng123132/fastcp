@@ -49,17 +49,13 @@ func (w *Writer) WriteFromMemory(relPath string, data []byte, mode os.FileMode, 
 		return fmt.Errorf("create %s: %w", relPath, err)
 	}
 
-	bw := bufio.NewWriterSize(f, w.bufferSize)
-	if _, err := bw.Write(data); err != nil {
-		f.Close()
+	_, err = f.Write(data)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.Remove(targetPath)
 		return fmt.Errorf("write %s: %w", relPath, err)
-	}
-	if err := bw.Flush(); err != nil {
-		f.Close()
-		return fmt.Errorf("flush %s: %w", relPath, err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", relPath, err)
 	}
 
 	// Restore modification time
@@ -85,16 +81,15 @@ func (w *Writer) WriteFromStream(relPath string, r io.Reader, mode os.FileMode, 
 
 	bw := bufio.NewWriterSize(f, w.bufferSize)
 	n, err := io.Copy(bw, r)
+	if err == nil {
+		err = bw.Flush()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
 	if err != nil {
-		f.Close()
-		return n, fmt.Errorf("copy %s: %w", relPath, err)
-	}
-	if err := bw.Flush(); err != nil {
-		f.Close()
-		return n, fmt.Errorf("flush %s: %w", relPath, err)
-	}
-	if err := f.Close(); err != nil {
-		return n, fmt.Errorf("close %s: %w", relPath, err)
+		os.Remove(targetPath)
+		return n, fmt.Errorf("write %s: %w", relPath, err)
 	}
 
 	t := time.Unix(0, modTime)

@@ -81,8 +81,10 @@ func (s *Scheduler) Run(progressFn func(results []TargetResult)) []TargetResult 
 
 	// Start progress reporter
 	done := make(chan struct{})
+	progressDone := make(chan struct{})
 	if progressFn != nil {
 		go func() {
+			defer close(progressDone)
 			ticker := time.NewTicker(200 * time.Millisecond)
 			defer ticker.Stop()
 			for {
@@ -95,6 +97,8 @@ func (s *Scheduler) Run(progressFn func(results []TargetResult)) []TargetResult 
 				}
 			}
 		}()
+	} else {
+		close(progressDone)
 	}
 
 	for i := range s.targets {
@@ -121,6 +125,7 @@ func (s *Scheduler) Run(progressFn func(results []TargetResult)) []TargetResult 
 
 	wg.Wait()
 	close(done)
+	<-progressDone // wait for progress goroutine to finish
 
 	return results
 }
