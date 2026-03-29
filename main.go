@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"runtime"
@@ -25,30 +26,73 @@ var (
 	dryRun      bool
 	verbose     bool
 	preloadAll  bool
+	jsonOutput  bool
+	quiet       bool
 )
+
+// JSON output structures
+type jsonResult struct {
+	OK      bool           `json:"ok"`
+	Source  string         `json:"source"`
+	Stats  jsonStats      `json:"stats"`
+	Targets []jsonTarget  `json:"targets"`
+	Elapsed string        `json:"elapsed"`
+}
+
+type jsonStats struct {
+	Files     int   `json:"files"`
+	Dirs      int   `json:"dirs"`
+	TotalBytes int64 `json:"total_bytes"`
+}
+
+type jsonTarget struct {
+	Path        string `json:"path"`
+	OK          bool   `json:"ok"`
+	Error       string `json:"error,omitempty"`
+	FilesCopied int64  `json:"files_copied"`
+	BytesCopied int64  `json:"bytes_copied"`
+	Skipped     int64  `json:"skipped,omitempty"`
+	Speed       string `json:"speed"`
+	Duration    string `json:"duration"`
+	Verified    *bool  `json:"verified,omitempty"`
+}
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "fastcp <source> <target1> [target2] [target3] ...",
-		Short: "FastCP - cross-platform multi-target fast copy tool",
-		Long: `FastCP reads source files into memory once, then writes to multiple targets in parallel.
-Optimized for copying to multiple USB drives on the same hub.`,
-		Args: cobra.MinimumNArgs(2),
-		RunE: runCopy,
+		Use:   "fastcp <source> <target1> [target2] ...",
+		Short: "multi-target parallel file copy",
+		Long:  "Read source into memory once, write to multiple targets in parallel.",
+		Args:  cobra.MinimumNArgs(2),
+		RunE:  runCopy,
+		SilenceUsage: true,
 	}
 
-	rootCmd.Flags().IntVarP(&concurrency, "concurrency", "c", 3, "number of targets to write simultaneously")
-	rootCmd.Flags().StringVarP(&bufferSize, "buffer-size", "b", "4M", "write buffer size (e.g. 1M, 4M, 8M)")
-	rootCmd.Flags().BoolVar(&doVerify, "verify", false, "verify copies with xxhash after completion")
-	rootCmd.Flags().BoolVar(&incremental, "incremental", false, "skip files that already exist with same size/time")
-	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "preview only, do not copy")
+	rootCmd.Flags().IntVarP(&concurrency, "concurrency", "c", 3, "simultaneous target writes")
+	rootCmd.Flags().StringVarP(&bufferSize, "buffer-size", "b", "4M", "write buffer size")
+	rootCmd.Flags().BoolVar(&doVerify, "verify", false, "xxhash verify after copy")
+	rootCmd.Flags().BoolVar(&incremental, "incremental", false, "skip unchanged files")
+	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "preview only")
 	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
-	rootCmd.Flags().BoolVar(&preloadAll, "preload-all", false, "preload ALL files into memory (default: only small files <256KB)")
+	rootCmd.Flags().BoolVar(&preloadAll, "preload-all", false, "preload all files into memory")
+	rootCmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output (for AI/scripts)")
+	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "minimal output")
 
 	rootCmd.Version = version
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
+	}
+}
+
+func log(format string, a ...interface{}) {
+	if !jsonOutput && !quiet {
+		fmt.Fprintf(os.Stderr, format+"\n", a...)
+	}
+}
+
+func logv(format string, a ...interface{}) {
+	if verbose && !jsonOutput && !quiet {
+		fmt.Fprintf(os.Stderr, format+"\n", a...)
 	}
 }
 
@@ -61,17 +105,16 @@ func runCopy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid buffer-size: %w", err)
 	}
 
-	// Step 1: Scan source directory
-	fmt.Printf("Scanning source: %s\n", srcDir)
+	// scan
+	log("scan %s", srcDir)
 	scanStart := time.Now()
 	sr, err := scanner.Scan(srcDir)
 	if err != nil {
-		return fmt.Errorf("scan failed: %w", err)
+		return fmt.Errorf("scan: %w", err)
 	}
-	fmt.Printf("Found %d files (%s) in %d directories [%v]\n",
-		sr.TotalFiles,
+	log("  %d files, %d dirs, %s [%v]",
+		sr.TotalFiles, len(sr.Dirs),
 		scheduler.FormatSize(sr.TotalSize),
-		len(sr.Dirs),
 		time.Since(scanStart).Round(time.Millisecond),
 	)
 
@@ -85,134 +128,190 @@ func runCopy(cmd *cobra.Command, args []string) error {
 		for _, f := range largeFiles {
 			largeTotal += f.Size
 		}
-		fmt.Printf("  Small files (<256KB): %d (%s)\n", len(smallFiles), scheduler.FormatSize(smallTotal))
-		fmt.Printf("  Large files (>=256KB): %d (%s)\n", len(largeFiles), scheduler.FormatSize(largeTotal))
+		logv("  small(<256K): %d (%s)", len(smallFiles), scheduler.FormatSize(smallTotal))
+		logv("  large(>=256K): %d (%s)", len(largeFiles), scheduler.FormatSize(largeTotal))
 	}
 
 	if dryRun {
-		fmt.Println("\n[DRY RUN] Would copy to:")
+		log("dry-run: would copy to %d targets", len(targets))
 		for _, t := range targets {
-			fmt.Printf("  -> %s\n", t)
+			log("  -> %s", t)
 		}
-		fmt.Printf("Concurrency: %d, Buffer: %s\n", concurrency, bufferSize)
 		return nil
 	}
 
-	// Step 2: Preload files into memory
+	// preload
 	pool := buffer.NewPool(sr)
-	fmt.Print("Loading source files into memory...")
 	loadStart := time.Now()
-
-	if preloadAll || sr.TotalSize <= 4*1024*1024*1024 { // auto preload if <= 4GB
+	if preloadAll || sr.TotalSize <= 4*1024*1024*1024 {
 		err = pool.PreloadAll(nil)
 	} else {
 		err = pool.PreloadSmallFiles(nil)
 	}
 	if err != nil {
-		return fmt.Errorf("preload failed: %w", err)
+		return fmt.Errorf("preload: %w", err)
 	}
-	loadDuration := time.Since(loadStart)
-	fmt.Printf(" %s cached [%v]\n",
-		scheduler.FormatSize(pool.TotalCached()),
-		loadDuration.Round(time.Millisecond),
-	)
+	log("cache %s [%v]", scheduler.FormatSize(pool.TotalCached()),
+		time.Since(loadStart).Round(time.Millisecond))
 
-	// Force GC before copy to free scanner temporaries
 	runtime.GC()
 
-	// Step 3: Copy to all targets
-	fmt.Printf("\nCopying to %d targets (concurrency=%d):\n", len(targets), concurrency)
-	for i, t := range targets {
-		fmt.Printf("  [%d] %s\n", i+1, t)
+	// copy
+	log("copy -> %d targets (concurrency=%d)", len(targets), concurrency)
+	for _, t := range targets {
+		logv("  %s", t)
 	}
-	fmt.Println()
 
 	cfg := copier.Config{
 		BufferSize:  bufSize,
 		Incremental: incremental,
-		DryRun:      false,
 	}
 
 	sched := scheduler.New(sr, pool, targets, concurrency, cfg)
 	copyStart := time.Now()
 
-	results := sched.Run(func(results []scheduler.TargetResult) {
-		// Progress display
-		printProgress(results, sr.TotalSize, sr.TotalFiles, copyStart)
-	})
+	var progressFn func([]scheduler.TargetResult)
+	if !jsonOutput && !quiet {
+		progressFn = func(results []scheduler.TargetResult) {
+			printProgress(results, sr.TotalSize, sr.TotalFiles, copyStart)
+		}
+	}
 
+	results := sched.Run(progressFn)
 	copyDuration := time.Since(copyStart)
-	fmt.Print("\r\033[K") // clear progress line
 
-	// Step 4: Print summary
-	fmt.Println("\n--- Copy Summary ---")
-	allOK := true
-	for _, r := range results {
-		status := "OK"
-		if r.Error != nil {
-			status = fmt.Sprintf("FAILED: %v", r.Error)
-			allOK = false
-		}
+	// clear progress line
+	if !jsonOutput && !quiet {
+		fmt.Fprintf(os.Stderr, "\r\033[K")
+	}
 
-		filesCopied := r.Progress.FilesCopied.Load()
-		bytesCopied := r.Progress.BytesCopied.Load()
-		speed := float64(0)
-		if r.Duration.Seconds() > 0 {
-			speed = float64(bytesCopied) / r.Duration.Seconds()
-		}
+	// verify
+	type verifyResult struct {
+		ok *bool
+	}
+	verifyResults := make([]verifyResult, len(results))
 
-		fmt.Printf("  %s: %d files, %s, %s, %s\n",
-			r.TargetDir,
-			filesCopied,
-			scheduler.FormatSize(bytesCopied),
-			r.Duration.Round(time.Millisecond),
-			scheduler.FormatSpeed(speed),
-		)
-		if r.Error != nil {
-			fmt.Printf("    Status: %s\n", status)
-		}
-		if incremental {
-			skipped := r.Progress.FilesSkipped.Load()
-			if skipped > 0 {
-				fmt.Printf("    Skipped: %d files (unchanged)\n", skipped)
+	if doVerify {
+		log("verify")
+		for i, r := range results {
+			if r.Error != nil {
+				continue
+			}
+			vp := &verify.VerifyProgress{}
+			vr, err := verify.Verify(sr, r.TargetDir, vp)
+			if err != nil {
+				log("  %s: ERR %v", r.TargetDir, err)
+				b := false
+				verifyResults[i].ok = &b
+				continue
+			}
+			ok := len(vr.Mismatched) == 0 && len(vr.Errors) == 0
+			verifyResults[i].ok = &ok
+			if ok {
+				log("  %s: OK %d/%d", r.TargetDir, vr.MatchedFiles, vr.TotalFiles)
+			} else {
+				log("  %s: FAIL", r.TargetDir)
+				for _, m := range vr.Mismatched {
+					log("    DIFF %s", m.RelPath)
+				}
+				for _, e := range vr.Errors {
+					log("    ERR %s: %s", e.RelPath, e.Error)
+				}
 			}
 		}
 	}
 
-	fmt.Printf("\nTotal time: %v\n", copyDuration.Round(time.Millisecond))
-
-	// Step 5: Verify if requested
-	if doVerify && allOK {
-		fmt.Println("\n--- Verification ---")
-		verifyAllOK := true
-		for _, r := range results {
+	// output
+	allOK := true
+	if jsonOutput {
+		jr := jsonResult{
+			OK:     true,
+			Source: srcDir,
+			Stats: jsonStats{
+				Files:      sr.TotalFiles,
+				Dirs:       len(sr.Dirs),
+				TotalBytes: sr.TotalSize,
+			},
+			Elapsed: copyDuration.Round(time.Millisecond).String(),
+		}
+		for i, r := range results {
+			bytesCopied := r.Progress.BytesCopied.Load()
+			speed := float64(0)
+			if r.Duration.Seconds() > 0 {
+				speed = float64(bytesCopied) / r.Duration.Seconds()
+			}
+			jt := jsonTarget{
+				Path:        r.TargetDir,
+				OK:          r.Error == nil,
+				FilesCopied: r.Progress.FilesCopied.Load(),
+				BytesCopied: bytesCopied,
+				Skipped:     r.Progress.FilesSkipped.Load(),
+				Speed:       scheduler.FormatSpeed(speed),
+				Duration:    r.Duration.Round(time.Millisecond).String(),
+				Verified:    verifyResults[i].ok,
+			}
 			if r.Error != nil {
-				continue
+				jt.Error = r.Error.Error()
+				jr.OK = false
+				allOK = false
 			}
-			fmt.Printf("Verifying %s...", r.TargetDir)
-			vp := &verify.VerifyProgress{}
-			vr, err := verify.Verify(sr, r.TargetDir, vp)
-			if err != nil {
-				fmt.Printf(" ERROR: %v\n", err)
-				verifyAllOK = false
-				continue
+			jr.Targets = append(jr.Targets, jt)
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(jr)
+	} else {
+		// Unix-style summary to stdout
+		for _, r := range results {
+			bytesCopied := r.Progress.BytesCopied.Load()
+			speed := float64(0)
+			if r.Duration.Seconds() > 0 {
+				speed = float64(bytesCopied) / r.Duration.Seconds()
 			}
-			if len(vr.Mismatched) == 0 && len(vr.Errors) == 0 {
-				fmt.Printf(" OK (%d/%d files match)\n", vr.MatchedFiles, vr.TotalFiles)
-			} else {
-				verifyAllOK = false
-				fmt.Printf(" MISMATCH!\n")
-				for _, m := range vr.Mismatched {
-					fmt.Printf("    DIFF: %s (src=%x, tgt=%x)\n", m.RelPath, m.SourceHash, m.TargetHash)
+
+			status := "OK"
+			if r.Error != nil {
+				status = "FAIL"
+				allOK = false
+			}
+
+			line := fmt.Sprintf("%s\t%s\t%d files\t%s\t%s\t%s",
+				status,
+				r.TargetDir,
+				r.Progress.FilesCopied.Load(),
+				scheduler.FormatSize(bytesCopied),
+				r.Duration.Round(time.Millisecond),
+				scheduler.FormatSpeed(speed),
+			)
+
+			if incremental {
+				skipped := r.Progress.FilesSkipped.Load()
+				if skipped > 0 {
+					line += fmt.Sprintf("\t(%d skipped)", skipped)
 				}
-				for _, e := range vr.Errors {
-					fmt.Printf("    ERR: %s: %s\n", e.RelPath, e.Error)
+			}
+
+			if verifyResults[len(results)-1].ok != nil {
+				// find this target's verify result
+				for j, vr := range verifyResults {
+					if results[j].TargetDir == r.TargetDir && vr.ok != nil {
+						if *vr.ok {
+							line += "\tverified"
+						} else {
+							line += "\tverify-fail"
+						}
+					}
 				}
+			}
+
+			fmt.Println(line)
+
+			if r.Error != nil {
+				fmt.Fprintf(os.Stderr, "fastcp: %s: %v\n", r.TargetDir, r.Error)
 			}
 		}
-		if verifyAllOK {
-			fmt.Println("All targets verified successfully!")
-		}
+
+		log("total: %v", copyDuration.Round(time.Millisecond))
 	}
 
 	if !allOK {
@@ -223,43 +322,40 @@ func runCopy(cmd *cobra.Command, args []string) error {
 
 func printProgress(results []scheduler.TargetResult, totalSize int64, totalFiles int, start time.Time) {
 	var totalCopied int64
-	var totalDone int64
 	for _, r := range results {
 		totalCopied += r.Progress.BytesCopied.Load()
-		totalDone += r.Progress.FilesCopied.Load()
 	}
 
 	elapsed := time.Since(start).Seconds()
-	avgSpeed := float64(0)
+	speed := float64(0)
 	if elapsed > 0 {
-		avgSpeed = float64(totalCopied) / elapsed
+		speed = float64(totalCopied) / elapsed
 	}
 
-	// Overall progress across all targets
 	totalExpected := totalSize * int64(len(results))
 	pct := float64(0)
 	if totalExpected > 0 {
 		pct = float64(totalCopied) / float64(totalExpected) * 100
 	}
 
-	fmt.Printf("\r\033[K  [%.1f%%] %s / %s | %s | targets: ",
+	fmt.Fprintf(os.Stderr, "\r\033[K  %.0f%% %s/%s %s ",
 		pct,
 		scheduler.FormatSize(totalCopied),
 		scheduler.FormatSize(totalExpected),
-		scheduler.FormatSpeed(avgSpeed),
+		scheduler.FormatSpeed(speed),
 	)
 
 	for i, r := range results {
 		if i > 0 {
-			fmt.Print(" ")
+			fmt.Fprint(os.Stderr, " ")
 		}
 		fc := r.Progress.FilesCopied.Load()
 		if r.GetError() != nil {
-			fmt.Print("X")
+			fmt.Fprint(os.Stderr, "X")
 		} else if fc >= int64(totalFiles) {
-			fmt.Print("done")
+			fmt.Fprint(os.Stderr, "*")
 		} else {
-			fmt.Printf("%d/%d", fc, totalFiles)
+			fmt.Fprintf(os.Stderr, "%d/%d", fc, totalFiles)
 		}
 	}
 }
