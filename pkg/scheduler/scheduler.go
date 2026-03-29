@@ -16,6 +16,7 @@ type TargetResult struct {
 	Error     error
 	Duration  time.Duration
 	Progress  *copier.Progress
+	mu        sync.Mutex
 }
 
 // Scheduler manages parallel copy operations to multiple targets.
@@ -45,6 +46,27 @@ func New(sr *scanner.ScanResult, pool *buffer.Pool, targets []string, concurrenc
 
 // Run executes parallel copy to all targets, calling progressFn periodically.
 // progressFn receives the slice of all TargetResult (including in-progress ones).
+// Finished returns true if the target has completed (successfully or with error).
+func (r *TargetResult) Finished() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.Duration > 0
+}
+
+// GetError returns the error (thread-safe).
+func (r *TargetResult) GetError() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.Error
+}
+
+// GetDuration returns the duration (thread-safe).
+func (r *TargetResult) GetDuration() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.Duration
+}
+
 func (s *Scheduler) Run(progressFn func(results []TargetResult)) []TargetResult {
 	results := make([]TargetResult, len(s.targets))
 	for i, t := range s.targets {
@@ -90,8 +112,10 @@ func (s *Scheduler) Run(progressFn func(results []TargetResult)) []TargetResult 
 				s.config,
 				results[idx].Progress,
 			)
+			results[idx].mu.Lock()
 			results[idx].Duration = time.Since(start)
 			results[idx].Error = err
+			results[idx].mu.Unlock()
 		}(i)
 	}
 

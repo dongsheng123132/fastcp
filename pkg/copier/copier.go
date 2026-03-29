@@ -73,7 +73,9 @@ func CopyToTarget(
 				return fmt.Errorf("open %s: %w", fi.RelPath, err)
 			}
 			n, err := w.WriteFromStream(fi.RelPath, r, fi.Mode, fi.ModTime)
-			r.Close()
+			if cerr := r.Close(); cerr != nil && err == nil {
+				err = cerr
+			}
 			if err != nil {
 				return fmt.Errorf("stream %s to %s: %w", fi.RelPath, targetDir, err)
 			}
@@ -94,7 +96,8 @@ func shouldSkip(fi *scanner.FileInfo, targetDir string) bool {
 		return false // file doesn't exist, need to copy
 	}
 
-	// Skip if same size and target is not older
+	// Skip if same size and target is not older.
+	// Compare at 2-second granularity for FAT32/exFAT compatibility.
 	return targetInfo.Size() == fi.Size &&
-		targetInfo.ModTime().UnixNano() >= fi.ModTime
+		targetInfo.ModTime().Unix() >= (fi.ModTime/1e9)-2
 }

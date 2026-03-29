@@ -254,7 +254,7 @@ func printProgress(results []scheduler.TargetResult, totalSize int64, totalFiles
 			fmt.Print(" ")
 		}
 		fc := r.Progress.FilesCopied.Load()
-		if r.Error != nil {
+		if r.GetError() != nil {
 			fmt.Print("X")
 		} else if fc >= int64(totalFiles) {
 			fmt.Print("done")
@@ -282,6 +282,9 @@ func parseSize(s string) (int, error) {
 	_, err := fmt.Sscanf(s, "%d", &n)
 	if err != nil {
 		return 0, fmt.Errorf("cannot parse %q as size", s)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("size must be positive, got %d", n)
 	}
 	return n * multiplier, nil
 }
