@@ -2,6 +2,10 @@
 
 [English](#english) | [中文](#中文)
 
+<p align="center">
+  <img src="docs/fastcp-demo.png" alt="FastCP 真实运行 — 一份源一次读入内存，并行写入 3 个 U 盘并逐盘 xxhash 校验，各 1.60 GB/s" width="720">
+</p>
+
 ---
 
 ## 中文
