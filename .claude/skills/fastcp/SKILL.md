@@ -1,6 +1,10 @@
 ---
+slug: fastcp
 name: fastcp
 version: 1.1.1
+displayName: FastCP 多目标并行复制
+summary: 源文件只读一次，并行写入多个U盘，xxhash 校验，--json 供 AI 调用。
+license: Apache-2.0
 description: "Multi-target parallel file copy CLI. Reads source once into memory, writes to multiple USB drives concurrently. | 多目标并行复制工具，源文件只读一次，同时写入多个U盘。"
 user_invocable: true
 ---
