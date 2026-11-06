@@ -1,5 +1,7 @@
 # FastCP - 跨平台多目标快速复制 CLI 工具
 
+
+作者 / Author：He Fangsheng (贺方升 / 贺去病; Dosen) · [hequbing.com](https://www.hequbing.com)
 [English](#english) | [中文](#中文)
 
 <p align="center">
